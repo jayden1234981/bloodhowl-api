@@ -1,13 +1,14 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Dict
 from pydantic import BaseModel
+from typing import List
 import json
 import asyncio
+import os
+from contextlib import suppress
 
-app = FastAPI()
+app = FastAPI(title="BLOODHOWL API")
 
-# Allow frontend to connect
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -16,11 +17,34 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Store active connections
-clients: List[Dict] = []
-mentor_token = "CHANGE_THIS_MENTOR_TOKEN_123" # Move to env var in production
+# Thread-safe connection manager
+class ConnectionManager:
+    def __init__(self):
+        self.active: List = []
+        self.lock = asyncio.Lock()
 
-approved_brokers = ["Razor Markets", "Accumarkets", "XM", "RCG MARKET", "Exness", "Just Markets", "Headway", "Profin Wealth"]
+    async def connect(self, websocket: WebSocket, client_data: dict):
+        async with self.lock:
+            self.active.append({
+                "websocket": websocket,
+                "info": client_data,
+                "is_mentor": client_data.get('role') == 'mentor'
+            })
+
+    async def disconnect(self, websocket: WebSocket):
+        async with self.lock:
+            self.active[:] = [c for c in self.active if c["websocket"]!= websocket]
+
+    async def broadcast_to_broker(self, signal_data: dict):
+        async with self.lock:
+            for client in self.active:
+                if not client["is_mentor"] and client['info']['broker'] == signal_data['broker']:
+                    with suppress(Exception):
+                        await client['websocket'].send_json(signal_data)
+
+manager = ConnectionManager()
+mentor_token = 
+approved_brokers = ["Razor Markets", "Accumarkets", "XM", "RCG MARKET", "Exneos.getenv("MENTOR_TOKEN",Bh0wl_X9kP2mQ8vL4zR7tY1nW5jF6dS3hG123")ss", "Just Markets", "Headway", "Profin Wealth"]
 
 class Signal(BaseModel):
     broker: str
@@ -30,65 +54,61 @@ class Signal(BaseModel):
     stop_loss: float
     take_profit: float
     token: str
-    strategy: str = "Reversal Pattern" # reason for entry
+    strategy: str = "Reversal Pattern"
     reward: int = 0 # 0-100%
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     try:
-        client_info = await websocket.receive_text()
+        # 1. Get client info with 10s timeout
+        client_info = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
         client_data = json.loads(client_info)
 
-        if client_data.get('role') == 'mentor':
-            clients.append({"websocket": websocket, "info": client_data, "is_mentor": True})
-        else:
-            # Validate MT4/MT5 creds here before adding
-            if client_data['broker'] not in approved_brokers:
+        # 2. Validate broker before adding
+        if client_data.get('role')!= 'mentor':
+            if client_data.get('broker') not in approved_brokers:
                 await websocket.close(code=1008, reason="Broker not supported")
                 return
-            clients.append({"websocket": websocket, "info": client_data, "is_mentor": False})
 
+        await manager.connect(websocket, client_data)
+
+        # 3. Heartbeat every 25s to prevent Render killing idle WS
         while True:
-            await websocket.receive_text() # Keep alive
-    except WebSocketDisconnect:
-        clients[:] = [c for c in clients if c["websocket"]!= websocket]
-    except Exception as e:
-        await websocket.close(code=1011, reason=str(e))
+            await asyncio.sleep(25)
+            await websocket.send_json({"type": "ping"})
 
-async def broadcast_signal(signal_data: dict):
-    disconnected = []
-    for client in clients:
-        if not client["is_mentor"] and client['info']['broker'] == signal_data['broker']:
-            try:
-                await client['websocket'].send_json(signal_data)
-            except:
-                disconnected.append(client)
-    for client in disconnected:
-        clients.remove(client)
+    except asyncio.TimeoutError:
+        await websocket.close(code=1001, reason="No client info sent in 10s")
+    except WebSocketDisconnect:
+        await manager.disconnect(websocket)
+    except Exception as e:
+        await manager.disconnect(websocket)
+        with suppress(Exception):
+            await websocket.close(code=1011, reason=str(e)[:123])
 
 @app.post("/send_signal")
 async def send_signal(signal: Signal):
     if signal.token!= mentor_token:
         raise HTTPException(status_code=401, detail="Unauthorized")
-
     if signal.broker not in approved_brokers:
         raise HTTPException(status_code=400, detail="Broker not supported")
-
     if not 0 <= signal.reward <= 100:
         raise HTTPException(status_code=400, detail="Reward must be 0-100%")
 
     signal_data = signal.dict()
     del signal_data['token'] # Don't broadcast token
 
-    # Broadcast to all users of that broker in <10s
-    asyncio.create_task(broadcast_signal(signal_data))
-
-    return {"status": "success", "message": "Signal broadcasted", "execution_time": "<10s"}
+    asyncio.create_task(manager.broadcast_to_broker(signal_data))
+    return {"status": "success", "message": "Signal broadcasted"}
 
 @app.get("/")
 def root():
-    return {"status": "EA SURGE API Live", "clients_connected": len(clients)}
+    return {"status": "BLOODHOWL API Live", "clients_connected": len(manager.active)}
+
+@app.get("/health")
+def health():
+    return {"status": "ok"} # Ping this with UptimeRobot to prevent sleep
 
 # NOTE: MT5/MT4 execution happens on CLIENT SIDE app, not server
 # Server can't run terminal64.exe. The app receives signal via WS and executes locally
