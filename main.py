@@ -43,7 +43,7 @@ class ConnectionManager:
                         await client['websocket'].send_json(signal_data)
 
 manager = ConnectionManager()
-mentor_token = os.getenv("MENTOR_TOKEN",BLOODHOWL_PLACEHOLDER_123")
+mentor_token = os.getenv("MENTOR_TOKEN", "BLOODHOWL_PLACEHOLDER_123")
 approved_brokers = ["Razor Markets", "Trade245", "XM", "RCG MARKET", "Exness", "Just Markets", "Headway", "Profin Wealth"]
 
 class Signal(BaseModel):
